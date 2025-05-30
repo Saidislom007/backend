@@ -1,34 +1,34 @@
 require('dotenv').config();
 const express = require('express');
-const serverless = require('serverless-http');
 const mongoose = require('mongoose');
+const serverless = require('serverless-http');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
-const axios = require('axios');
 const multer = require('multer');
 const fs = require('fs');
+const axios = require('axios');
 const FormData = require('form-data');
 
-// Mongoose model
-const Vocabulary = require('./models/vocab.model');
-const errorMiddleware = require('./middlewares/error.middleware');
-
-// Routes (bular sizda alohida fayllarda saqlanadi)
+// Routes
 const postRouter = require('./routes/post.route');
 const authRouter = require('./routes/auth.route');
 const adminRouter = require('./routes/admin.route');
 const userRouter = require('./routes/user.route');
-const savodxonTestRouter = require('./routes/test.route');
-const statRouter = require("./routes/stat.route");
-const vocabRouter = require("./routes/vocab.route");
-const readingTestRouter = require("./routes/readingTest.route");
-const savRouter = require("./routes/sav.route");
-const grammarTestRouter = require('./routes/grammar.route');
-const testRouter1 = require("./routes/test1.route");
-const listeningRouter = require("./routes/listening.route");
+const statRouter = require('./routes/stat.route');
+const vocabRouter = require('./routes/vocab.route');
+const readingRouter = require('./routes/readingTest.route');
+const savodxonRouter = require('./routes/test.route');
+const savRouter = require('./routes/sav.route');
+const grammarRouter = require('./routes/grammar.route');
+const testRouter1 = require('./routes/test1.route');
+const listeningRouter = require('./routes/listening.route');
+const demoRouter = require('./routes/demo.route');
+const errorMiddleware = require('./middlewares/error.middleware');
+const Vocabulary = require('./models/vocab.model');
 
 const app = express();
 
+// === CORS ===
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
@@ -36,134 +36,119 @@ const allowedOrigins = [
   "http://192.168.1.11:1000",
   "http://192.168.100.99:5173",
 ];
-
 app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error("CORS bloklandi"));
-    }
+  origin: (origin, cb) => {
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    cb(new Error("CORS blocked"));
   },
-  credentials: true
+  credentials: true,
 }));
 
-app.use(cookieParser());
 app.use(express.json());
+app.use(cookieParser());
 
-// MongoDB ulanish
-mongoose.connect(process.env.DB_URL, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => console.log("✅ MongoDB connected"))
-  .catch(err => console.error("❌ MongoDB error:", err));
-
-// Multer config for Vercel (faqat /tmp ruxsat etilgan)
-const upload = multer({ dest: '/tmp' });
-
-// Routers
+// === Routes ===
 app.use('/api/post', postRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/user', userRouter);
-app.use("/api/stat", statRouter);
-app.use("/api/vocab", vocabRouter);
-app.use('/api/readingTest', readingTestRouter);
-app.use('/api/savodxon/test', savodxonTestRouter);
+app.use('/api/stat', statRouter);
+app.use('/api/vocab', vocabRouter);
+app.use('/api/readingTest', readingRouter);
+app.use('/api/savodxon/test', savodxonRouter);
 app.use('/api/sav', savRouter);
-app.use('/api/grammar', grammarTestRouter);
+app.use('/api/grammar', grammarRouter);
 app.use('/api/test', testRouter1);
 app.use('/api/listening', listeningRouter);
+app.use('/api/demo', demoRouter);
 
-// Bulk vocab insert
+// === Bulk vocab add ===
 app.post('/api/vocab/add/bulk', async (req, res) => {
-  const list = req.body;
-  if (!Array.isArray(list) || list.length === 0) {
-    return res.status(400).json({ error: 'Empty array yoki noto‘g‘ri format' });
-  }
   try {
+    const list = req.body;
+    if (!Array.isArray(list) || list.length === 0) {
+      return res.status(400).json({ error: 'Empty array or invalid format' });
+    }
     const inserted = await Vocabulary.insertMany(list, { ordered: false });
-    res.json({ message: 'Bulk vocabulary added', count: inserted.length });
+    res.json({ message: 'Added', count: inserted.length });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Whisper transcription
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+// === Speaking mock (Whisper) ===
+const upload = multer({ dest: 'uploads/' });
+if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
+
 app.post('/api/speaking-mock', upload.single('audio'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No audio file uploaded' });
-
-    const formData = new FormData();
-    formData.append('file', fs.createReadStream(req.file.path));
-    formData.append('model', 'whisper-1');
-
-    const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        ...formData.getHeaders()
-      }
-    });
-
-    const transcript = response.data.text;
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const transcript = await transcribeAudio(req.file.path);
     res.json({ transcript });
   } catch (err) {
-    console.error("❌ Whisper error:", err.response?.data || err.message);
-    res.status(500).json({ error: 'Failed to transcribe audio' });
+    console.error(err);
+    res.status(500).json({ error: 'Transcription error' });
   } finally {
     fs.unlink(req.file.path, () => {});
   }
 });
 
-// Writing check (IELTS)
-app.post("/api/check-writing", async (req, res) => {
+async function transcribeAudio(audioPath) {
+  const formData = new FormData();
+  formData.append('file', fs.createReadStream(audioPath));
+  formData.append('model', 'whisper-1');
+
+  const res = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      ...formData.getHeaders()
+    }
+  });
+  return res.data.text;
+}
+
+// === Writing check ===
+app.post('/api/check-writing', async (req, res) => {
   try {
     const { text } = req.body;
-    if (!text) return res.status(400).json({ message: "No text provided" });
+    if (!text) return res.status(400).json({ message: 'Text is required' });
 
     const response = await axios.post(
-      "https://openrouter.ai/api/v1/chat/completions",
+      'https://openrouter.ai/api/v1/chat/completions',
       {
-        model: "openai/gpt-3.5-turbo",
+        model: 'openai/gpt-3.5-turbo',
         messages: [
-          {
-            role: "system",
-            content: `You are an IELTS writing examiner. Evaluate the task based on:
-- Task Achievement
-- Coherence and Cohesion
-- Lexical Resource
-- Grammatical Range and Accuracy
-
-Format:
-Feedback: ...
-Score: X.X`
-          },
-          { role: "user", content: text }
+          { role: 'system', content: 'You are an IELTS examiner...' },
+          { role: 'user', content: text }
         ]
       },
       {
         headers: {
           Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json"
+          'Content-Type': 'application/json'
         }
       }
     );
 
-    const feedback = response.data.choices?.[0]?.message?.content || "No feedback";
-    const scoreMatch = feedback.match(/Score:\s*([\d.]+)/i);
-    const score = scoreMatch ? parseFloat(scoreMatch[1]) : null;
+    const feedback = response.data.choices?.[0]?.message?.content || '';
+    const match = feedback.match(/Score:\s*([\d.]+)/i);
+    const score = match ? parseFloat(match[1]) : null;
 
     res.json({ feedback, score });
   } catch (err) {
-    console.error("❌ Writing check error:", err.response?.data || err.message);
-    res.status(500).json({ message: "Internal Server Error" });
+    console.error(err);
+    res.status(500).json({ error: 'Check writing failed' });
   }
 });
 
-// Error middleware
 app.use(errorMiddleware);
 
-// Serverless export
-module.exports = serverless(app);
+// === MongoDB ===
+mongoose.connect(process.env.DB_URL, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+}).then(() => console.log("✅ DB connected")).catch(err => console.error("❌ DB Error:", err));
+
+// === Export for Vercel ===
+module.exports.handler = serverless(app);
